@@ -1015,20 +1015,27 @@ export default function BatterijCalculator() {
       });
       
       // Chart data
-      const dailyData = {};
-      energyProfile.forEach((row, idx) => {
-        const dateKey = row.datetime.toISOString().split('T')[0];
-        if (!dailyData[dateKey]) {
-          dailyData[dateKey] = { date: dateKey, pv: 0, verbruik: 0, afnameSmart: 0, injectieSmart: 0 };
+      // Maandelijkse chart data (heel jaar, huidige situatie)
+      const monthlyChartData = {};
+      energyProfile.forEach((row) => {
+        const monthKey = `${row.datetime.getFullYear()}-${String(row.datetime.getMonth() + 1).padStart(2, '0')}`;
+        if (!monthlyChartData[monthKey]) {
+          monthlyChartData[monthKey] = { 
+            month: monthKey, 
+            pv: 0, 
+            verbruik: 0, 
+            afname: 0, 
+            injectie: 0 
+          };
         }
-        const d = dailyData[dateKey];
-        d.pv += row.pv;
-        d.verbruik += row.verbruik;
-        d.afnameSmart += scenario3.results[idx]?.gridAfname || 0;
-        d.injectieSmart += scenario3.results[idx]?.gridInjectie || 0;
+        const m = monthlyChartData[monthKey];
+        m.pv += row.pv;
+        m.verbruik += row.verbruik;
+        m.afname += row.afnameOriginal;
+        m.injectie += row.injectieOriginal;
       });
       
-      const chartData = Object.values(dailyData).slice(0, 30);
+      const chartData = Object.values(monthlyChartData).sort((a, b) => a.month.localeCompare(b.month));
       
       setResults({
         scenario1,
@@ -1567,20 +1574,44 @@ export default function BatterijCalculator() {
             
             {/* Chart */}
             <div style={styles.card}>
-              <h3 style={{fontSize:'1.25rem',fontWeight:'bold',marginBottom:'16px'}}>📈 Dagelijkse Energiestromen (30 dagen)</h3>
-              <div style={{height:'256px'}}>
+              <h3 style={{fontSize:'1.25rem',fontWeight:'bold',marginBottom:'16px'}}>📈 Jaaroverzicht Energiestromen (Huidige Situatie)</h3>
+              <div style={{height:'300px'}}>
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={results.chartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                    <XAxis dataKey="date" stroke="#64748b" tick={{fontSize: 10}} tickFormatter={(v) => v.slice(5)} />
-                    <YAxis stroke="#64748b" tick={{fontSize: 10}} />
-                    <Tooltip contentStyle={{backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px'}} />
+                    <XAxis 
+                      dataKey="month" 
+                      stroke="#64748b" 
+                      tick={{fontSize: 10}} 
+                      tickFormatter={(v) => {
+                        const monthNames = ['Jan','Feb','Mrt','Apr','Mei','Jun','Jul','Aug','Sep','Okt','Nov','Dec'];
+                        const monthIdx = parseInt(v.split('-')[1]) - 1;
+                        return monthNames[monthIdx];
+                      }} 
+                    />
+                    <YAxis stroke="#64748b" tick={{fontSize: 10}} label={{ value: 'kWh', angle: -90, position: 'insideLeft', fill: '#64748b' }} />
+                    <Tooltip 
+                      contentStyle={{backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px'}} 
+                      formatter={(value) => [value.toFixed(0) + ' kWh']}
+                      labelFormatter={(label) => {
+                        const monthNames = ['Januari','Februari','Maart','April','Mei','Juni','Juli','Augustus','September','Oktober','November','December'];
+                        const monthIdx = parseInt(label.split('-')[1]) - 1;
+                        return monthNames[monthIdx] + ' ' + label.split('-')[0];
+                      }}
+                    />
                     <Legend />
-                    <Area type="monotone" dataKey="pv" name="PV" fill="#fbbf24" fillOpacity={0.3} stroke="#fbbf24" />
-                    <Area type="monotone" dataKey="verbruik" name="Verbruik" fill="#3b82f6" fillOpacity={0.3} stroke="#3b82f6" />
-                    <Line type="monotone" dataKey="afnameSmart" name="Afname (Slim)" stroke="#10b981" strokeWidth={2} dot={false} />
+                    <Area type="monotone" dataKey="pv" name="PV Opbrengst" fill="#fbbf24" fillOpacity={0.3} stroke="#fbbf24" strokeWidth={2} />
+                    <Area type="monotone" dataKey="verbruik" name="Totaal Verbruik" fill="#8b5cf6" fillOpacity={0.2} stroke="#8b5cf6" strokeWidth={2} />
+                    <Line type="monotone" dataKey="afname" name="Afname (Net)" stroke="#ef4444" strokeWidth={2} dot={{fill: '#ef4444', r: 3}} />
+                    <Line type="monotone" dataKey="injectie" name="Injectie (Net)" stroke="#10b981" strokeWidth={2} dot={{fill: '#10b981', r: 3}} />
                   </ComposedChart>
                 </ResponsiveContainer>
+              </div>
+              <div style={{marginTop:'12px',display:'flex',justifyContent:'center',gap:'24px',fontSize:'0.8rem',color:'#94a3b8'}}>
+                <span>🟡 PV: {results.scenario1.totalPVKwh?.toFixed(0) || 0} kWh</span>
+                <span>🟣 Verbruik: {results.scenario1.totalVerbruikKwh?.toFixed(0) || 0} kWh</span>
+                <span>🔴 Afname: {results.scenario1.totalAfnameKwh?.toFixed(0) || 0} kWh</span>
+                <span>🟢 Injectie: {results.scenario1.totalInjectieKwh?.toFixed(0) || 0} kWh</span>
               </div>
             </div>
             
