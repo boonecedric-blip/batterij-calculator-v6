@@ -179,6 +179,40 @@ const styles = {
     color: '#fcd34d',
     fontSize: '0.875rem'
   },
+  progressBar: {
+    width: '100%',
+    height: '8px',
+    background: 'rgba(255,255,255,0.1)',
+    borderRadius: '4px',
+    overflow: 'hidden',
+    marginTop: '12px'
+  },
+  progressFill: {
+    height: '100%',
+    background: 'linear-gradient(90deg, #10b981, #059669)',
+    borderRadius: '4px',
+    transition: 'width 0.3s ease'
+  },
+  fileChip: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '8px 12px',
+    background: 'rgba(16,185,129,0.2)',
+    border: '1px solid rgba(16,185,129,0.3)',
+    borderRadius: '8px',
+    margin: '4px',
+    fontSize: '0.875rem'
+  },
+  removeBtn: {
+    background: 'none',
+    border: 'none',
+    color: '#f87171',
+    cursor: 'pointer',
+    padding: '2px 6px',
+    borderRadius: '4px',
+    fontSize: '1rem'
+  },
   scenarioGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
@@ -343,6 +377,23 @@ const parseCSV = (text) => {
     }
   }
   return data;
+};
+
+// Detecteer het type bestand (afname, injectie, of gecombineerd)
+const detectFileType = (data) => {
+  if (!data || data.length === 0) return 'unknown';
+  
+  // Check alle unieke registers in het bestand
+  const registers = [...new Set(data.map(r => r['Register'] || '').filter(r => r))];
+  
+  const hasAfname = registers.some(r => r.toLowerCase().includes('afname'));
+  const hasInjectie = registers.some(r => r.toLowerCase().includes('injectie'));
+  
+  if (hasAfname && hasInjectie) return 'combined';
+  if (hasAfname) return 'afname';
+  if (hasInjectie) return 'injectie';
+  
+  return 'unknown';
 };
 
 const processFluviusData = (data) => {
@@ -671,12 +722,16 @@ const simulateSmartBattery = (data, config) => {
 // =============================================
 
 export default function BatterijCalculator() {
+  const [uploadedFiles, setUploadedFiles] = useState([]);
   const [csvData, setCsvData] = useState(null);
   const [processedData, setProcessedData] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStatus, setProcessingStatus] = useState('');
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('input');
   const [results, setResults] = useState(null);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
   
   const [batteryCapacity, setBatteryCapacity] = useState(9);
   const [batteryPrice, setBatteryPrice] = useState(4500);
@@ -687,112 +742,176 @@ export default function BatterijCalculator() {
   const formatCurrency = (value) => `€${value.toFixed(2)}`;
   const formatNumber = (value, decimals = 0) => value.toFixed(decimals);
 
-  const handleFileUpload = useCallback((event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const handleFileUpload = useCallback(async (event) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
     
     setIsProcessing(true);
     setError(null);
+    setProgress(0);
     
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const text = e.target?.result;
+    try {
+      let allParsedData = [];
+      const newUploadedFiles = [...uploadedFiles];
+      
+      for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
+        const file = files[fileIdx];
+        setProcessingStatus(`Bestand ${fileIdx + 1}/${files.length} lezen: ${file.name}...`);
+        setProgress(Math.floor((fileIdx / files.length) * 30));
+        
+        // Read file
+        const text = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => resolve(e.target?.result);
+          reader.onerror = reject;
+          reader.readAsText(file, 'utf-8');
+        });
+        
+        setProcessingStatus(`Bestand ${fileIdx + 1}/${files.length} parsen...`);
+        await new Promise(r => setTimeout(r, 50)); // UI update
+        
         const parsed = parseCSV(text);
         
         if (!parsed || parsed.length === 0) {
-          throw new Error('Geen data gevonden in het bestand');
+          throw new Error(`Geen data gevonden in ${file.name}`);
         }
         
         const cols = Object.keys(parsed[0]);
         if (!cols.some(c => c.includes('Van (datum)'))) {
-          throw new Error('Onbekend CSV formaat. Gebruik een Fluvius export.');
+          throw new Error(`Onbekend CSV formaat in ${file.name}. Gebruik een Fluvius export.`);
         }
         
-        const processed = processFluviusData(parsed);
+        // Detect type
+        const fileType = detectFileType(parsed);
         
-        if (processed.length === 0) {
-          throw new Error('Geen geldige meetdata gevonden');
-        }
-        
-        const yearCounts = {};
-        processed.forEach(row => {
-          const year = row.datetime.getFullYear();
-          if (year >= 2024) {
-            yearCounts[year] = (yearCounts[year] || 0) + 1;
-          }
+        newUploadedFiles.push({
+          name: file.name,
+          type: fileType,
+          rows: parsed.length
         });
         
-        const bestYear = Object.entries(yearCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
-        
-        if (!bestYear) {
-          throw new Error('Geen data van 2024 of 2025 gevonden');
-        }
-        
-        const targetYear = parseInt(bestYear);
-        const yearData = processed.filter(row => row.datetime.getFullYear() === targetYear);
-        
-        const expectedQuarters = (targetYear % 4 === 0) ? 35136 : 35040;
-        const coverage = (yearData.length / expectedQuarters) * 100;
-        
-        let finalData;
-        let extrapolationInfo = null;
-        
-        if (coverage < 95) {
-          finalData = extrapolateToFullYear(yearData, targetYear);
-          extrapolationInfo = finalData.extrapolationInfo;
-        } else {
-          finalData = yearData;
-        }
-        
-        setCsvData({ 
-          year: targetYear, 
-          recordCount: yearData.length,
-          extrapolationInfo: extrapolationInfo,
-          coverage: coverage.toFixed(1)
-        });
-        setProcessedData(finalData);
-        
-      } catch (err) {
-        setError(err.message);
-        setCsvData(null);
-        setProcessedData(null);
-      } finally {
-        setIsProcessing(false);
+        allParsedData = allParsedData.concat(parsed);
       }
-    };
-    
-    reader.onerror = () => {
-      setError('Fout bij het lezen van het bestand');
+      
+      setUploadedFiles(newUploadedFiles);
+      setProcessingStatus('Data verwerken...');
+      setProgress(40);
+      await new Promise(r => setTimeout(r, 50));
+      
+      // Process all data together
+      const processed = processFluviusData(allParsedData);
+      setProgress(60);
+      
+      if (processed.length === 0) {
+        throw new Error('Geen geldige meetdata gevonden');
+      }
+      
+      // Check for missing data types
+      const hasAfname = processed.some(r => r.afname > 0);
+      const hasInjectie = processed.some(r => r.injectie > 0);
+      
+      setProcessingStatus('Beste jaar selecteren...');
+      setProgress(70);
+      
+      const yearCounts = {};
+      processed.forEach(row => {
+        const year = row.datetime.getFullYear();
+        if (year >= 2024) {
+          yearCounts[year] = (yearCounts[year] || 0) + 1;
+        }
+      });
+      
+      const bestYear = Object.entries(yearCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+      
+      if (!bestYear) {
+        throw new Error('Geen data van 2024 of 2025 gevonden');
+      }
+      
+      const targetYear = parseInt(bestYear);
+      const yearData = processed.filter(row => row.datetime.getFullYear() === targetYear);
+      
+      const expectedQuarters = (targetYear % 4 === 0) ? 35136 : 35040;
+      const coverage = (yearData.length / expectedQuarters) * 100;
+      
+      setProcessingStatus('Data finaliseren...');
+      setProgress(80);
+      
+      let finalData;
+      let extrapolationInfo = null;
+      
+      if (coverage < 95) {
+        setProcessingStatus('Data extrapoleren naar volledig jaar...');
+        finalData = extrapolateToFullYear(yearData, targetYear);
+        extrapolationInfo = finalData.extrapolationInfo;
+      } else {
+        finalData = yearData;
+      }
+      
+      setProgress(100);
+      setCsvData({ 
+        year: targetYear, 
+        recordCount: yearData.length,
+        extrapolationInfo: extrapolationInfo,
+        coverage: coverage.toFixed(1),
+        hasAfname,
+        hasInjectie
+      });
+      setProcessedData(finalData);
+      setProcessingStatus('');
+      
+    } catch (err) {
+      setError(err.message);
+      setCsvData(null);
+      setProcessedData(null);
+    } finally {
       setIsProcessing(false);
-    };
-    
-    reader.readAsText(file, 'utf-8');
-  }, []);
+      // Reset file input
+      event.target.value = '';
+    }
+  }, [uploadedFiles]);
+
+  const removeFile = (index) => {
+    const newFiles = uploadedFiles.filter((_, i) => i !== index);
+    setUploadedFiles(newFiles);
+    if (newFiles.length === 0) {
+      setCsvData(null);
+      setProcessedData(null);
+    }
+  };
+
+  const clearAllFiles = () => {
+    setUploadedFiles([]);
+    setCsvData(null);
+    setProcessedData(null);
+    setError(null);
+  };
 
   const calculateScenarios = useCallback(() => {
     if (!processedData || processedData.length === 0) return;
     
     setIsProcessing(true);
+    setProcessingStatus('Scenario\'s berekenen...');
     
-    try {
-      const energyProfile = processedData.map(row => {
-        const pv = calculatePVProduction(row.datetime, annualPVProduction);
-        const marketPrice = getMarketPrice(row.datetime);
-        const effectivePV = Math.max(pv, row.injectie);
-        const eigenverbruikPV = Math.max(0, effectivePV - row.injectie);
-        const totaalVerbruik = row.afname + eigenverbruikPV;
-        
-        return {
-          datetime: row.datetime,
-          afnameOriginal: row.afname,
-          injectieOriginal: row.injectie,
-          pv: effectivePV,
-          verbruik: totaalVerbruik,
-          eigenverbruikPV,
-          marketPrice
-        };
-      });
+    // Use setTimeout to allow UI to update
+    setTimeout(() => {
+      try {
+        const energyProfile = processedData.map(row => {
+          const pv = calculatePVProduction(row.datetime, annualPVProduction);
+          const marketPrice = getMarketPrice(row.datetime);
+          const effectivePV = Math.max(pv, row.injectie);
+          const eigenverbruikPV = Math.max(0, effectivePV - row.injectie);
+          const totaalVerbruik = row.afname + eigenverbruikPV;
+          
+          return {
+            datetime: row.datetime,
+            afnameOriginal: row.afname,
+            injectieOriginal: row.injectie,
+            pv: effectivePV,
+            verbruik: totaalVerbruik,
+            eigenverbruikPV,
+            marketPrice
+          };
+        });
       
       const totalCalculatedPV = energyProfile.reduce((sum, r) => sum + r.pv, 0);
       const scaleFactor = annualPVProduction / (totalCalculatedPV || 1);
@@ -921,24 +1040,31 @@ export default function BatterijCalculator() {
       });
       
       setActiveTab('results');
+      setProcessingStatus('');
       
-    } catch (err) {
-      setError('Fout bij berekening: ' + err.message);
-    } finally {
-      setIsProcessing(false);
-    }
+      } catch (err) {
+        setError('Fout bij berekening: ' + err.message);
+      } finally {
+        setIsProcessing(false);
+      }
+    }, 100);
   }, [processedData, batteryCapacity, batteryPrice, annualPVProduction, afnameTarief, injectieTarief, csvData]);
 
-  const generatePDF = async () => {
+  const generatePDF = useCallback(() => {
     if (!results) return;
     
-    const doc = new jsPDF('p', 'mm', 'a4');
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const pageHeight = doc.internal.pageSize.getHeight();
-    const margin = 15;
-    const contentWidth = pageWidth - (margin * 2);
+    setPdfGenerating(true);
     
-    let yPos = margin;
+    // Use setTimeout to allow UI to update
+    setTimeout(() => {
+      try {
+        const doc = new jsPDF('p', 'mm', 'a4');
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const margin = 15;
+        const contentWidth = pageWidth - (margin * 2);
+        
+        let yPos = margin;
     
     // Helper functies
     const addText = (text, x, y, options = {}) => {
@@ -1138,7 +1264,15 @@ export default function BatterijCalculator() {
     
     // Download
     doc.save(`batterij-rapport-hivolta-${results.dataYear}.pdf`);
-  };
+    
+      } catch (err) {
+        console.error('PDF error:', err);
+        setError('Fout bij PDF generatie: ' + err.message);
+      } finally {
+        setPdfGenerating(false);
+      }
+    }, 100);
+  }, [results, batteryCapacity, batteryPrice, annualPVProduction, afnameTarief, injectieTarief]);
 
   return (
     <div style={styles.container}>
@@ -1180,24 +1314,70 @@ export default function BatterijCalculator() {
             {/* File Upload */}
             <div style={styles.card}>
               <h2 style={styles.cardTitle}>📁 1. Upload Fluvius CSV</h2>
+              <p style={{color:'#94a3b8', fontSize:'0.9rem', marginBottom:'16px'}}>
+                Je kunt één gecombineerd bestand uploaden, of aparte bestanden voor afname en injectie.
+              </p>
+              
               <div style={styles.uploadArea}>
                 <input 
                   type="file" 
                   accept=".csv" 
-                  onChange={handleFileUpload} 
+                  onChange={handleFileUpload}
+                  multiple
+                  disabled={isProcessing}
                   style={{display:'none'}} 
                   id="csv-upload" 
                 />
-                <label htmlFor="csv-upload" style={{cursor:'pointer'}}>
+                <label htmlFor="csv-upload" style={{cursor: isProcessing ? 'wait' : 'pointer'}}>
                   <div style={{fontSize:'3rem',marginBottom:'8px'}}>📄</div>
-                  <p style={{fontSize:'1.1rem',margin:'8px 0'}}>Klik om CSV te selecteren</p>
-                  <p style={{fontSize:'0.875rem',color:'#94a3b8'}}>Exporteer kwartierdata van mijn.fluvius.be</p>
+                  <p style={{fontSize:'1.1rem',margin:'8px 0'}}>
+                    {isProcessing ? processingStatus || 'Verwerken...' : 'Klik om CSV bestanden te selecteren'}
+                  </p>
+                  <p style={{fontSize:'0.875rem',color:'#94a3b8'}}>
+                    Exporteer kwartierdata van mijn.fluvius.be
+                  </p>
                 </label>
               </div>
+              
+              {/* Progress bar */}
+              {isProcessing && (
+                <div style={styles.progressBar}>
+                  <div style={{...styles.progressFill, width: `${progress}%`}} />
+                </div>
+              )}
+              
+              {/* Uploaded files */}
+              {uploadedFiles.length > 0 && (
+                <div style={{marginTop:'16px'}}>
+                  <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'}}>
+                    <span style={{color:'#94a3b8', fontSize:'0.9rem'}}>Geüploade bestanden:</span>
+                    <button onClick={clearAllFiles} style={{...styles.removeBtn, fontSize:'0.8rem'}}>
+                      Alles wissen
+                    </button>
+                  </div>
+                  <div>
+                    {uploadedFiles.map((file, idx) => (
+                      <div key={idx} style={styles.fileChip}>
+                        <span>📄 {file.name}</span>
+                        <span style={{color:'#94a3b8', fontSize:'0.75rem'}}>
+                          ({file.type === 'combined' ? 'afname+injectie' : file.type})
+                        </span>
+                        <button onClick={() => removeFile(idx)} style={styles.removeBtn}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
               {csvData && (
                 <div style={styles.success}>
                   <div>✅ Data geladen: {csvData.recordCount.toLocaleString()} meetpunten van {csvData.year}</div>
-                  <div style={{fontSize:'0.875rem',color:'#94a3b8',marginTop:'4px'}}>Dekking: {csvData.coverage}% van het jaar</div>
+                  <div style={{fontSize:'0.875rem',color:'#94a3b8',marginTop:'4px'}}>
+                    Dekking: {csvData.coverage}% van het jaar
+                    {csvData.hasAfname && csvData.hasInjectie && ' | Afname ✓ Injectie ✓'}
+                    {csvData.hasAfname && !csvData.hasInjectie && ' | Afname ✓ Injectie ✗'}
+                    {!csvData.hasAfname && csvData.hasInjectie && ' | Afname ✗ Injectie ✓'}
+                  </div>
                   {csvData.extrapolationInfo && (
                     <div style={styles.warning}>
                       ⚠️ Data onvolledig - {csvData.extrapolationInfo.extrapolatedCount.toLocaleString()} meetpunten geëxtrapoleerd
@@ -1280,7 +1460,7 @@ export default function BatterijCalculator() {
               disabled={!processedData || isProcessing}
               style={{...styles.button, ...(!processedData || isProcessing ? styles.buttonDisabled : {})}}
             >
-              {isProcessing ? '⏳ Berekenen...' : '🧮 Bereken Scenarios'}
+              {isProcessing ? '⏳ ' + (processingStatus || 'Berekenen...') : '🧮 Bereken Scenarios'}
             </button>
           </div>
         )}
@@ -1434,8 +1614,12 @@ export default function BatterijCalculator() {
             
             {/* PDF Download */}
             <div style={{textAlign:'center',marginTop:'24px'}}>
-              <button onClick={generatePDF} style={styles.downloadBtn}>
-                📥 Download Rapport als PDF
+              <button 
+                onClick={generatePDF} 
+                disabled={pdfGenerating}
+                style={{...styles.downloadBtn, ...(pdfGenerating ? {opacity: 0.7, cursor: 'wait'} : {})}}
+              >
+                {pdfGenerating ? '⏳ PDF genereren...' : '📥 Download Rapport als PDF'}
               </button>
             </div>
             
