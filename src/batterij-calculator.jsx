@@ -1042,6 +1042,9 @@ export default function BatterijCalculator() {
       setActiveTab('results');
       setProcessingStatus('');
       
+      // Scroll naar boven
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      
       } catch (err) {
         setError('Fout bij berekening: ' + err.message);
       } finally {
@@ -1050,14 +1053,19 @@ export default function BatterijCalculator() {
     }, 100);
   }, [processedData, batteryCapacity, batteryPrice, annualPVProduction, afnameTarief, injectieTarief, csvData]);
 
+
   const generatePDF = useCallback(() => {
-    if (!results) return;
+    if (!results) {
+      console.log('Geen results beschikbaar');
+      return;
+    }
     
+    console.log('PDF generatie gestart...');
     setPdfGenerating(true);
     
-    // Use setTimeout to allow UI to update
     setTimeout(() => {
       try {
+        console.log('jsPDF initialiseren...');
         const doc = new jsPDF('p', 'mm', 'a4');
         const pageWidth = doc.internal.pageSize.getWidth();
         const pageHeight = doc.internal.pageSize.getHeight();
@@ -1065,206 +1073,252 @@ export default function BatterijCalculator() {
         const contentWidth = pageWidth - (margin * 2);
         
         let yPos = margin;
-    
-    // Helper functies
-    const addText = (text, x, y, options = {}) => {
-      const { size = 10, color = [50, 50, 50], style = 'normal', align = 'left' } = options;
-      doc.setFontSize(size);
-      doc.setTextColor(...color);
-      doc.setFont('helvetica', style);
-      doc.text(text, x, y, { align });
-    };
-    
-    const drawBox = (x, y, w, h, fillColor, borderColor = null) => {
-      doc.setFillColor(...fillColor);
-      if (borderColor) {
-        doc.setDrawColor(...borderColor);
-        doc.setLineWidth(0.5);
-        doc.roundedRect(x, y, w, h, 3, 3, 'FD');
-      } else {
-        doc.roundedRect(x, y, w, h, 3, 3, 'F');
-      }
-    };
-    
-    const checkNewPage = (neededSpace) => {
-      if (yPos + neededSpace > pageHeight - margin) {
-        doc.addPage();
-        yPos = margin;
-        return true;
-      }
-      return false;
-    };
-    
-    // === HEADER ===
-    // Logo/titel achtergrond
-    drawBox(margin, yPos, contentWidth, 25, [16, 185, 129]);
-    addText('SLIMME BATTERIJ CALCULATOR', pageWidth / 2, yPos + 10, { size: 16, color: [255, 255, 255], style: 'bold', align: 'center' });
-    addText('Hivolta - Energierapport', pageWidth / 2, yPos + 18, { size: 11, color: [255, 255, 255], align: 'center' });
-    yPos += 32;
-    
-    // Rapport info
-    addText(`Gegenereerd op: ${new Date().toLocaleDateString('nl-BE')}`, margin, yPos, { size: 9, color: [100, 100, 100] });
-    addText(`Databasis: ${results.dataYear}`, pageWidth - margin, yPos, { size: 9, color: [100, 100, 100], align: 'right' });
-    yPos += 8;
-    
-    // Configuratie box
-    drawBox(margin, yPos, contentWidth, 18, [248, 250, 252], [226, 232, 240]);
-    addText('Configuratie:', margin + 5, yPos + 6, { size: 9, style: 'bold' });
-    addText(`Batterij: ${batteryCapacity} kWh (${batteryCapacity/2} kW)  |  Investering: ${formatCurrency(batteryPrice)}  |  PV: ${annualPVProduction.toLocaleString()} kWh/jaar`, margin + 5, yPos + 13, { size: 9 });
-    yPos += 25;
-    
-    // === SCENARIO VERGELIJKING ===
-    addText('JAARLIJKSE VERGELIJKING', margin, yPos, { size: 12, style: 'bold', color: [30, 41, 59] });
-    yPos += 8;
-    
-    const boxWidth = (contentWidth - 10) / 3;
-    const boxHeight = 52;
-    
-    // Box 1: Huidige situatie
-    drawBox(margin, yPos, boxWidth, boxHeight, [248, 250, 252], [203, 213, 225]);
-    addText('Huidige Situatie', margin + boxWidth/2, yPos + 8, { size: 10, style: 'bold', align: 'center' });
-    addText('(Enkel PV)', margin + boxWidth/2, yPos + 14, { size: 8, color: [100, 100, 100], align: 'center' });
-    addText(formatCurrency(results.scenario1.nettoKosten), margin + boxWidth/2, yPos + 26, { size: 18, style: 'bold', color: [220, 38, 38], align: 'center' });
-    addText(`Afname: ${results.scenario1.totalAfnameKwh.toFixed(0)} kWh`, margin + 5, yPos + 36, { size: 8, color: [100, 100, 100] });
-    addText(`Injectie: ${results.scenario1.totalInjectieKwh.toFixed(0)} kWh`, margin + 5, yPos + 42, { size: 8, color: [100, 100, 100] });
-    addText(`Zelfconsumptie: ${results.scenario1.zelfconsumptiegraad.toFixed(1)}%`, margin + 5, yPos + 48, { size: 8, color: [100, 100, 100] });
-    
-    // Box 2: Domme batterij
-    const box2X = margin + boxWidth + 5;
-    drawBox(box2X, yPos, boxWidth, boxHeight, [239, 246, 255], [147, 197, 253]);
-    addText('Domme Batterij', box2X + boxWidth/2, yPos + 8, { size: 10, style: 'bold', align: 'center' });
-    addText('(Vaste tarieven)', box2X + boxWidth/2, yPos + 14, { size: 8, color: [100, 100, 100], align: 'center' });
-    addText(formatCurrency(results.scenario2.nettoKosten), box2X + boxWidth/2, yPos + 26, { size: 18, style: 'bold', color: [59, 130, 246], align: 'center' });
-    addText(`Besparing: ${formatCurrency(results.scenario2.savingsVsNoBattery)}/jaar`, box2X + 5, yPos + 36, { size: 8, color: [34, 197, 94] });
-    addText(`Terugverdientijd: ${results.scenario2.paybackYears === Infinity ? '∞' : results.scenario2.paybackYears.toFixed(1) + ' jaar'}`, box2X + 5, yPos + 42, { size: 8, color: [100, 100, 100] });
-    addText(`Zelfconsumptie: ${results.scenario2.zelfconsumptiegraad.toFixed(1)}%`, box2X + 5, yPos + 48, { size: 8, color: [100, 100, 100] });
-    
-    // Box 3: Slimme batterij (highlight)
-    const box3X = margin + (boxWidth + 5) * 2;
-    drawBox(box3X, yPos, boxWidth, boxHeight, [236, 253, 245], [16, 185, 129]);
-    doc.setFillColor(16, 185, 129);
-    doc.roundedRect(box3X + boxWidth - 35, yPos + 2, 33, 8, 2, 2, 'F');
-    addText('AANBEVOLEN', box3X + boxWidth - 18.5, yPos + 7.5, { size: 6, color: [255, 255, 255], style: 'bold', align: 'center' });
-    addText('Slimme Batterij', box3X + boxWidth/2, yPos + 14, { size: 10, style: 'bold', align: 'center' });
-    addText(formatCurrency(results.scenario3.nettoKosten), box3X + boxWidth/2, yPos + 26, { size: 18, style: 'bold', color: [16, 185, 129], align: 'center' });
-    addText(`Besparing: ${formatCurrency(results.scenario3.savingsVsNoBattery)}/jaar`, box3X + 5, yPos + 36, { size: 8, color: [34, 197, 94] });
-    addText(`Terugverdientijd: ${results.scenario3.paybackYears === Infinity ? '∞' : results.scenario3.paybackYears.toFixed(1) + ' jaar'}`, box3X + 5, yPos + 42, { size: 8, color: [100, 100, 100] });
-    addText(`Extra vs dom: +${formatCurrency(results.scenario3.savingsVsDumb)}/jr`, box3X + 5, yPos + 48, { size: 8, color: [245, 158, 11], style: 'bold' });
-    
-    yPos += boxHeight + 12;
-    
-    // === CONCLUSIE BOX ===
-    const savingsPerYear = results.scenario3.savingsVsNoBattery;
-    const paybackText = results.scenario3.paybackYears === Infinity ? 'niet terugverdiend' : `${results.scenario3.paybackYears.toFixed(1)} jaar`;
-    
-    drawBox(margin, yPos, contentWidth, 22, [254, 249, 195], [250, 204, 21]);
-    addText('💡 CONCLUSIE', margin + 5, yPos + 7, { size: 10, style: 'bold', color: [133, 77, 14] });
-    addText(`Met een slimme batterij bespaart u jaarlijks ${formatCurrency(savingsPerYear)} t.o.v. uw huidige situatie. De investering van ${formatCurrency(batteryPrice)} is terugverdiend in ${paybackText}.`, margin + 5, yPos + 15, { size: 9, color: [133, 77, 14] });
-    yPos += 30;
-    
-    // === MAANDELIJKS OVERZICHT ===
-    checkNewPage(80);
-    addText('MAANDELIJKS OVERZICHT', margin, yPos, { size: 12, style: 'bold', color: [30, 41, 59] });
-    yPos += 6;
-    
-    const monthNames = ['Januari','Februari','Maart','April','Mei','Juni','Juli','Augustus','September','Oktober','November','December'];
-    
-    // Tabel header
-    const colWidths = [28, 24, 24, 24, 24, 24, 32];
-    const rowHeight = 6;
-    
-    const drawTableRow = (data, isHeader = false, bgColor = null, textColors = null) => {
-      let xPos = margin;
-      
-      if (bgColor) {
-        doc.setFillColor(...bgColor);
-        doc.rect(margin, yPos - 4, contentWidth, rowHeight, 'F');
-      }
-      
-      data.forEach((cell, i) => {
-        const color = textColors ? textColors[i] : (isHeader ? [71, 85, 105] : [50, 50, 50]);
-        const style = isHeader ? 'bold' : 'normal';
-        const align = i === 0 ? 'left' : 'right';
-        const xOffset = i === 0 ? 2 : colWidths[i] - 2;
-        addText(cell, xPos + xOffset, yPos, { size: 7, color, style, align: i === 0 ? 'left' : 'right' });
-        xPos += colWidths[i];
-      });
-      yPos += rowHeight;
-    };
-    
-    // Header rij
-    drawTableRow(['Maand', 'Scenario', 'Afname', 'Injectie', 'Gem.Afn', 'Gem.Inj', 'Maandkost'], true, [241, 245, 249]);
-    drawTableRow(['', '', '(kWh)', '(kWh)', '(c/kWh)', '(c/kWh)', ''], true, [241, 245, 249]);
-    
-    // Lijn onder header
-    doc.setDrawColor(203, 213, 225);
-    doc.setLineWidth(0.3);
-    doc.line(margin, yPos - 3, margin + contentWidth, yPos - 3);
-    
-    // Data rijen
-    results.monthlyData.forEach((month, idx) => {
-      checkNewPage(20);
-      
-      const mIdx = parseInt(month.month.split('-')[1]) - 1;
-      const mName = monthNames[mIdx];
-      
-      // Huidige
-      drawTableRow([
-        mName, 'Huidige',
-        month.original.afnameKwh.toFixed(0),
-        month.original.injectieKwh.toFixed(0),
-        (month.original.avgAfnamePrice * 100).toFixed(1),
-        (month.original.avgInjectiePrice * 100).toFixed(1),
-        formatCurrency(month.original.nettoKost)
-      ], false, idx % 2 === 0 ? [255, 255, 255] : [248, 250, 252], [50,50,50,50,50,50,50,50,[220, 38, 38]]);
-      
-      // Dom
-      drawTableRow([
-        '', 'Dom',
-        month.dumb.afnameKwh.toFixed(0),
-        month.dumb.injectieKwh.toFixed(0),
-        (month.dumb.avgAfnamePrice * 100).toFixed(1),
-        (month.dumb.avgInjectiePrice * 100).toFixed(1),
-        formatCurrency(month.dumb.nettoKost)
-      ], false, idx % 2 === 0 ? [255, 255, 255] : [248, 250, 252], [50,50,50,50,50,50,50,50,[59, 130, 246]]);
-      
-      // Slim
-      drawTableRow([
-        '', 'Slim',
-        month.smart.afnameKwh.toFixed(0),
-        month.smart.injectieKwh.toFixed(0),
-        (month.smart.avgAfnamePrice * 100).toFixed(1),
-        (month.smart.avgInjectiePrice * 100).toFixed(1),
-        formatCurrency(month.smart.nettoKost)
-      ], false, idx % 2 === 0 ? [255, 255, 255] : [248, 250, 252], [50,50,50,50,50,50,50,50,[16, 185, 129]]);
-    });
-    
-    // Totalen
-    yPos += 2;
-    doc.setDrawColor(100, 100, 100);
-    doc.line(margin, yPos - 4, margin + contentWidth, yPos - 4);
-    
-    drawTableRow(['TOTAAL', 'Huidige', results.scenario1.totalAfnameKwh.toFixed(0), results.scenario1.totalInjectieKwh.toFixed(0), (afnameTarief*100).toFixed(1), (injectieTarief*100).toFixed(1), formatCurrency(results.scenario1.nettoKosten)], true, [241, 245, 249]);
-    drawTableRow(['', 'Dom', results.scenario2.totalAfnameKwh.toFixed(0), results.scenario2.totalInjectieKwh.toFixed(0), (afnameTarief*100).toFixed(1), (injectieTarief*100).toFixed(1), formatCurrency(results.scenario2.nettoKosten)], true, [239, 246, 255]);
-    drawTableRow(['', 'Slim', results.scenario3.totalAfnameKwh.toFixed(0), results.scenario3.totalInjectieKwh.toFixed(0), (results.scenario3.avgAfnamePrice*100).toFixed(1), (results.scenario3.avgInjectiePrice*100).toFixed(1), formatCurrency(results.scenario3.nettoKosten)], true, [236, 253, 245]);
-    
-    // === DISCLAIMER ===
-    yPos += 8;
-    checkNewPage(30);
-    
-    drawBox(margin, yPos, contentWidth, 20, [254, 243, 199], [250, 204, 21]);
-    addText('⚠️ Disclaimer', margin + 5, yPos + 6, { size: 8, style: 'bold', color: [146, 64, 14] });
-    addText('Deze calculator geeft een schatting op basis van historische verbruiksdata en marktprijzen. De werkelijke besparingen kunnen afwijken', margin + 5, yPos + 12, { size: 7, color: [146, 64, 14] });
-    addText('door veranderingen in energieprijzen, verbruikspatronen, weersomstandigheden en andere factoren. Dit is geen garantie of belofte.', margin + 5, yPos + 17, { size: 7, color: [146, 64, 14] });
-    
-    // === FOOTER ===
-    doc.setFontSize(8);
-    doc.setTextColor(150, 150, 150);
-    doc.text(`© ${new Date().getFullYear()} Hivolta - www.hivolta.be`, pageWidth / 2, pageHeight - 10, { align: 'center' });
-    
-    // Download
-    doc.save(`batterij-rapport-hivolta-${results.dataYear}.pdf`);
-    
+        
+        // === HEADER ===
+        doc.setFillColor(16, 185, 129);
+        doc.roundedRect(margin, yPos, contentWidth, 25, 3, 3, 'F');
+        doc.setFontSize(16);
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.text('SLIMME BATTERIJ CALCULATOR', pageWidth / 2, yPos + 10, { align: 'center' });
+        doc.setFontSize(11);
+        doc.text('Hivolta - Energierapport', pageWidth / 2, yPos + 18, { align: 'center' });
+        yPos += 32;
+        
+        // Rapport info
+        doc.setFontSize(9);
+        doc.setTextColor(100, 100, 100);
+        doc.setFont('helvetica', 'normal');
+        doc.text('Gegenereerd op: ' + new Date().toLocaleDateString('nl-BE'), margin, yPos);
+        doc.text('Databasis: ' + results.dataYear, pageWidth - margin, yPos, { align: 'right' });
+        yPos += 8;
+        
+        // Configuratie box
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(226, 232, 240);
+        doc.roundedRect(margin, yPos, contentWidth, 18, 3, 3, 'FD');
+        doc.setFontSize(9);
+        doc.setTextColor(50, 50, 50);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Configuratie:', margin + 5, yPos + 6);
+        doc.setFont('helvetica', 'normal');
+        doc.text('Batterij: ' + batteryCapacity + ' kWh | Investering: ' + formatCurrency(batteryPrice) + ' | PV: ' + annualPVProduction + ' kWh/jaar', margin + 5, yPos + 13);
+        yPos += 25;
+        
+        // === SCENARIO VERGELIJKING ===
+        doc.setFontSize(12);
+        doc.setTextColor(30, 41, 59);
+        doc.setFont('helvetica', 'bold');
+        doc.text('JAARLIJKSE VERGELIJKING', margin, yPos);
+        yPos += 8;
+        
+        const boxWidth = (contentWidth - 10) / 3;
+        const boxHeight = 50;
+        
+        // Box 1: Huidige situatie
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(203, 213, 225);
+        doc.roundedRect(margin, yPos, boxWidth, boxHeight, 3, 3, 'FD');
+        doc.setFontSize(10);
+        doc.setTextColor(50, 50, 50);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Huidige Situatie', margin + boxWidth/2, yPos + 8, { align: 'center' });
+        doc.setFontSize(8);
+        doc.setTextColor(100, 100, 100);
+        doc.setFont('helvetica', 'normal');
+        doc.text('(Enkel PV)', margin + boxWidth/2, yPos + 14, { align: 'center' });
+        doc.setFontSize(16);
+        doc.setTextColor(220, 38, 38);
+        doc.setFont('helvetica', 'bold');
+        doc.text(formatCurrency(results.scenario1.nettoKosten), margin + boxWidth/2, yPos + 26, { align: 'center' });
+        doc.setFontSize(7);
+        doc.setTextColor(100, 100, 100);
+        doc.setFont('helvetica', 'normal');
+        doc.text('Afname: ' + results.scenario1.totalAfnameKwh.toFixed(0) + ' kWh', margin + 5, yPos + 36);
+        doc.text('Injectie: ' + results.scenario1.totalInjectieKwh.toFixed(0) + ' kWh', margin + 5, yPos + 42);
+        
+        // Box 2: Domme batterij
+        const box2X = margin + boxWidth + 5;
+        doc.setFillColor(239, 246, 255);
+        doc.setDrawColor(147, 197, 253);
+        doc.roundedRect(box2X, yPos, boxWidth, boxHeight, 3, 3, 'FD');
+        doc.setFontSize(10);
+        doc.setTextColor(50, 50, 50);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Domme Batterij', box2X + boxWidth/2, yPos + 8, { align: 'center' });
+        doc.setFontSize(8);
+        doc.setTextColor(100, 100, 100);
+        doc.setFont('helvetica', 'normal');
+        doc.text('(Vaste tarieven)', box2X + boxWidth/2, yPos + 14, { align: 'center' });
+        doc.setFontSize(16);
+        doc.setTextColor(59, 130, 246);
+        doc.setFont('helvetica', 'bold');
+        doc.text(formatCurrency(results.scenario2.nettoKosten), box2X + boxWidth/2, yPos + 26, { align: 'center' });
+        doc.setFontSize(7);
+        doc.setTextColor(34, 197, 94);
+        doc.setFont('helvetica', 'normal');
+        doc.text('Besparing: ' + formatCurrency(results.scenario2.savingsVsNoBattery) + '/jaar', box2X + 5, yPos + 36);
+        doc.setTextColor(100, 100, 100);
+        const payback2 = results.scenario2.paybackYears === Infinity ? 'n.v.t.' : results.scenario2.paybackYears.toFixed(1) + ' jaar';
+        doc.text('Terugverdientijd: ' + payback2, box2X + 5, yPos + 42);
+        
+        // Box 3: Slimme batterij
+        const box3X = margin + (boxWidth + 5) * 2;
+        doc.setFillColor(236, 253, 245);
+        doc.setDrawColor(16, 185, 129);
+        doc.roundedRect(box3X, yPos, boxWidth, boxHeight, 3, 3, 'FD');
+        doc.setFontSize(10);
+        doc.setTextColor(16, 185, 129);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Slimme Batterij', box3X + boxWidth/2, yPos + 8, { align: 'center' });
+        doc.setFontSize(7);
+        doc.text('AANBEVOLEN', box3X + boxWidth/2, yPos + 14, { align: 'center' });
+        doc.setFontSize(16);
+        doc.text(formatCurrency(results.scenario3.nettoKosten), box3X + boxWidth/2, yPos + 26, { align: 'center' });
+        doc.setFontSize(7);
+        doc.setTextColor(34, 197, 94);
+        doc.setFont('helvetica', 'normal');
+        doc.text('Besparing: ' + formatCurrency(results.scenario3.savingsVsNoBattery) + '/jaar', box3X + 5, yPos + 36);
+        doc.setTextColor(100, 100, 100);
+        const payback3 = results.scenario3.paybackYears === Infinity ? 'n.v.t.' : results.scenario3.paybackYears.toFixed(1) + ' jaar';
+        doc.text('Terugverdientijd: ' + payback3, box3X + 5, yPos + 42);
+        
+        yPos += boxHeight + 12;
+        
+        // === CONCLUSIE BOX ===
+        const paybackText = results.scenario3.paybackYears === Infinity ? 'niet terugverdiend' : results.scenario3.paybackYears.toFixed(1) + ' jaar';
+        doc.setFillColor(254, 249, 195);
+        doc.setDrawColor(250, 204, 21);
+        doc.roundedRect(margin, yPos, contentWidth, 18, 3, 3, 'FD');
+        doc.setFontSize(9);
+        doc.setTextColor(133, 77, 14);
+        doc.setFont('helvetica', 'bold');
+        doc.text('CONCLUSIE: Met een slimme batterij bespaart u ' + formatCurrency(results.scenario3.savingsVsNoBattery) + '/jaar. Terugverdiend in ' + paybackText + '.', margin + 5, yPos + 11);
+        yPos += 26;
+        
+        // === MAANDELIJKS OVERZICHT ===
+        doc.setFontSize(12);
+        doc.setTextColor(30, 41, 59);
+        doc.text('MAANDELIJKS OVERZICHT', margin, yPos);
+        yPos += 8;
+        
+        const monthNames = ['Jan','Feb','Mrt','Apr','Mei','Jun','Jul','Aug','Sep','Okt','Nov','Dec'];
+        
+        // Tabel header
+        doc.setFillColor(241, 245, 249);
+        doc.rect(margin, yPos - 3, contentWidth, 7, 'F');
+        doc.setFontSize(7);
+        doc.setTextColor(71, 85, 105);
+        doc.setFont('helvetica', 'bold');
+        doc.text('Maand', margin + 2, yPos + 2);
+        doc.text('Scenario', margin + 22, yPos + 2);
+        doc.text('Afname', margin + 55, yPos + 2);
+        doc.text('Injectie', margin + 85, yPos + 2);
+        doc.text('Netto Kost', margin + 125, yPos + 2);
+        yPos += 8;
+        
+        // Maanddata
+        doc.setFont('helvetica', 'normal');
+        results.monthlyData.forEach((month) => {
+          // Check new page
+          if (yPos > pageHeight - 30) {
+            doc.addPage();
+            yPos = margin;
+            doc.setFillColor(241, 245, 249);
+            doc.rect(margin, yPos - 3, contentWidth, 7, 'F');
+            doc.setFontSize(7);
+            doc.setTextColor(71, 85, 105);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Maand', margin + 2, yPos + 2);
+            doc.text('Scenario', margin + 22, yPos + 2);
+            doc.text('Afname', margin + 55, yPos + 2);
+            doc.text('Injectie', margin + 85, yPos + 2);
+            doc.text('Netto Kost', margin + 125, yPos + 2);
+            yPos += 8;
+            doc.setFont('helvetica', 'normal');
+          }
+          
+          const mIdx = parseInt(month.month.split('-')[1]) - 1;
+          const mName = monthNames[mIdx];
+          
+          doc.setFontSize(7);
+          doc.setTextColor(50, 50, 50);
+          doc.text(mName, margin + 2, yPos);
+          doc.text('Huidige', margin + 22, yPos);
+          doc.text(month.original.afnameKwh.toFixed(0), margin + 65, yPos, { align: 'right' });
+          doc.text(month.original.injectieKwh.toFixed(0), margin + 95, yPos, { align: 'right' });
+          doc.setTextColor(220, 38, 38);
+          doc.text(formatCurrency(month.original.nettoKost), margin + 145, yPos, { align: 'right' });
+          yPos += 4;
+          
+          doc.setTextColor(50, 50, 50);
+          doc.text('', margin + 2, yPos);
+          doc.text('Dom', margin + 22, yPos);
+          doc.text(month.dumb.afnameKwh.toFixed(0), margin + 65, yPos, { align: 'right' });
+          doc.text(month.dumb.injectieKwh.toFixed(0), margin + 95, yPos, { align: 'right' });
+          doc.setTextColor(59, 130, 246);
+          doc.text(formatCurrency(month.dumb.nettoKost), margin + 145, yPos, { align: 'right' });
+          yPos += 4;
+          
+          doc.setTextColor(50, 50, 50);
+          doc.text('', margin + 2, yPos);
+          doc.text('Slim', margin + 22, yPos);
+          doc.text(month.smart.afnameKwh.toFixed(0), margin + 65, yPos, { align: 'right' });
+          doc.text(month.smart.injectieKwh.toFixed(0), margin + 95, yPos, { align: 'right' });
+          doc.setTextColor(16, 185, 129);
+          doc.text(formatCurrency(month.smart.nettoKost), margin + 145, yPos, { align: 'right' });
+          yPos += 6;
+        });
+        
+        // Totalen
+        yPos += 2;
+        doc.setDrawColor(100, 100, 100);
+        doc.setLineWidth(0.3);
+        doc.line(margin, yPos - 3, margin + contentWidth, yPos - 3);
+        
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7);
+        doc.setTextColor(50, 50, 50);
+        doc.text('TOTAAL', margin + 2, yPos);
+        doc.text('Huidige', margin + 22, yPos);
+        doc.text(results.scenario1.totalAfnameKwh.toFixed(0), margin + 65, yPos, { align: 'right' });
+        doc.text(results.scenario1.totalInjectieKwh.toFixed(0), margin + 95, yPos, { align: 'right' });
+        doc.setTextColor(220, 38, 38);
+        doc.text(formatCurrency(results.scenario1.nettoKosten), margin + 145, yPos, { align: 'right' });
+        yPos += 5;
+        
+        doc.setTextColor(50, 50, 50);
+        doc.text('', margin + 2, yPos);
+        doc.text('Slim', margin + 22, yPos);
+        doc.text(results.scenario3.totalAfnameKwh.toFixed(0), margin + 65, yPos, { align: 'right' });
+        doc.text(results.scenario3.totalInjectieKwh.toFixed(0), margin + 95, yPos, { align: 'right' });
+        doc.setTextColor(16, 185, 129);
+        doc.text(formatCurrency(results.scenario3.nettoKosten), margin + 145, yPos, { align: 'right' });
+        yPos += 10;
+        
+        // === DISCLAIMER ===
+        if (yPos > pageHeight - 35) {
+          doc.addPage();
+          yPos = margin;
+        }
+        doc.setFillColor(254, 243, 199);
+        doc.setDrawColor(250, 204, 21);
+        doc.roundedRect(margin, yPos, contentWidth, 18, 3, 3, 'FD');
+        doc.setFontSize(7);
+        doc.setTextColor(146, 64, 14);
+        doc.text('Disclaimer: Deze calculator geeft een schatting. Werkelijke besparingen kunnen afwijken.', margin + 5, yPos + 7);
+        doc.text('Raadpleeg een specialist voor persoonlijk advies.', margin + 5, yPos + 12);
+        
+        // === FOOTER ===
+        doc.setFontSize(8);
+        doc.setTextColor(150, 150, 150);
+        doc.text('Hivolta - www.hivolta.be', pageWidth / 2, pageHeight - 10, { align: 'center' });
+        
+        // Download
+        console.log('PDF opslaan...');
+        doc.save('batterij-rapport-hivolta-' + results.dataYear + '.pdf');
+        console.log('PDF opgeslagen!');
+        
       } catch (err) {
         console.error('PDF error:', err);
         setError('Fout bij PDF generatie: ' + err.message);
@@ -1272,7 +1326,8 @@ export default function BatterijCalculator() {
         setPdfGenerating(false);
       }
     }, 100);
-  }, [results, batteryCapacity, batteryPrice, annualPVProduction, afnameTarief, injectieTarief]);
+  }, [results, batteryCapacity, batteryPrice, annualPVProduction, formatCurrency]);
+
 
   return (
     <div style={styles.container}>
