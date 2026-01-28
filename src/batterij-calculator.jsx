@@ -1,7 +1,6 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area } from 'recharts';
 import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
 
 // =============================================
 // BELPEX MARKTPRIJZEN DATA (2024-2025)
@@ -930,80 +929,215 @@ export default function BatterijCalculator() {
     }
   }, [processedData, batteryCapacity, batteryPrice, annualPVProduction, afnameTarief, injectieTarief, csvData]);
 
-  const resultsRef = useRef(null);
-  
   const generatePDF = async () => {
-    if (!results || !resultsRef.current) return;
+    if (!results) return;
     
-    // Toon loading state
-    const button = document.querySelector('[data-pdf-button]');
-    if (button) {
-      button.textContent = '⏳ PDF genereren...';
-      button.disabled = true;
-    }
+    const doc = new jsPDF('p', 'mm', 'a4');
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 15;
+    const contentWidth = pageWidth - (margin * 2);
     
-    try {
-      // Maak canvas van de resultaten sectie
-      const canvas = await html2canvas(resultsRef.current, {
-        scale: 2,
-        useCORS: true,
-        logging: false,
-        backgroundColor: '#0f172a'
-      });
-      
-      const imgData = canvas.toDataURL('image/png');
-      
-      // Bereken PDF dimensies (A4)
-      const pdf = new jsPDF('p', 'mm', 'a4');
-      const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = pdf.internal.pageSize.getHeight();
-      
-      const imgWidth = canvas.width;
-      const imgHeight = canvas.height;
-      
-      const ratio = Math.min(pdfWidth / imgWidth, pdfHeight / imgHeight);
-      const scaledWidth = imgWidth * ratio;
-      const scaledHeight = imgHeight * ratio;
-      
-      // Als de afbeelding te lang is, verdeel over meerdere pagina's
-      const pageHeight = pdfHeight - 20; // marge
-      const totalPages = Math.ceil(scaledHeight / pageHeight);
-      
-      if (totalPages === 1) {
-        pdf.addImage(imgData, 'PNG', 0, 10, scaledWidth, scaledHeight);
+    let yPos = margin;
+    
+    // Helper functies
+    const addText = (text, x, y, options = {}) => {
+      const { size = 10, color = [50, 50, 50], style = 'normal', align = 'left' } = options;
+      doc.setFontSize(size);
+      doc.setTextColor(...color);
+      doc.setFont('helvetica', style);
+      doc.text(text, x, y, { align });
+    };
+    
+    const drawBox = (x, y, w, h, fillColor, borderColor = null) => {
+      doc.setFillColor(...fillColor);
+      if (borderColor) {
+        doc.setDrawColor(...borderColor);
+        doc.setLineWidth(0.5);
+        doc.roundedRect(x, y, w, h, 3, 3, 'FD');
       } else {
-        // Meerdere pagina's
-        let yOffset = 0;
-        for (let i = 0; i < totalPages; i++) {
-          if (i > 0) pdf.addPage();
-          
-          const sourceY = (i * pageHeight / ratio);
-          const sourceHeight = Math.min(pageHeight / ratio, imgHeight - sourceY);
-          
-          // Maak een tijdelijke canvas voor deze pagina
-          const pageCanvas = document.createElement('canvas');
-          pageCanvas.width = imgWidth;
-          pageCanvas.height = sourceHeight;
-          const ctx = pageCanvas.getContext('2d');
-          ctx.drawImage(canvas, 0, sourceY, imgWidth, sourceHeight, 0, 0, imgWidth, sourceHeight);
-          
-          const pageImgData = pageCanvas.toDataURL('image/png');
-          pdf.addImage(pageImgData, 'PNG', 0, 10, scaledWidth, sourceHeight * ratio);
-        }
+        doc.roundedRect(x, y, w, h, 3, 3, 'F');
+      }
+    };
+    
+    const checkNewPage = (neededSpace) => {
+      if (yPos + neededSpace > pageHeight - margin) {
+        doc.addPage();
+        yPos = margin;
+        return true;
+      }
+      return false;
+    };
+    
+    // === HEADER ===
+    // Logo/titel achtergrond
+    drawBox(margin, yPos, contentWidth, 25, [16, 185, 129]);
+    addText('SLIMME BATTERIJ CALCULATOR', pageWidth / 2, yPos + 10, { size: 16, color: [255, 255, 255], style: 'bold', align: 'center' });
+    addText('Hivolta - Energierapport', pageWidth / 2, yPos + 18, { size: 11, color: [255, 255, 255], align: 'center' });
+    yPos += 32;
+    
+    // Rapport info
+    addText(`Gegenereerd op: ${new Date().toLocaleDateString('nl-BE')}`, margin, yPos, { size: 9, color: [100, 100, 100] });
+    addText(`Databasis: ${results.dataYear}`, pageWidth - margin, yPos, { size: 9, color: [100, 100, 100], align: 'right' });
+    yPos += 8;
+    
+    // Configuratie box
+    drawBox(margin, yPos, contentWidth, 18, [248, 250, 252], [226, 232, 240]);
+    addText('Configuratie:', margin + 5, yPos + 6, { size: 9, style: 'bold' });
+    addText(`Batterij: ${batteryCapacity} kWh (${batteryCapacity/2} kW)  |  Investering: ${formatCurrency(batteryPrice)}  |  PV: ${annualPVProduction.toLocaleString()} kWh/jaar`, margin + 5, yPos + 13, { size: 9 });
+    yPos += 25;
+    
+    // === SCENARIO VERGELIJKING ===
+    addText('JAARLIJKSE VERGELIJKING', margin, yPos, { size: 12, style: 'bold', color: [30, 41, 59] });
+    yPos += 8;
+    
+    const boxWidth = (contentWidth - 10) / 3;
+    const boxHeight = 52;
+    
+    // Box 1: Huidige situatie
+    drawBox(margin, yPos, boxWidth, boxHeight, [248, 250, 252], [203, 213, 225]);
+    addText('Huidige Situatie', margin + boxWidth/2, yPos + 8, { size: 10, style: 'bold', align: 'center' });
+    addText('(Enkel PV)', margin + boxWidth/2, yPos + 14, { size: 8, color: [100, 100, 100], align: 'center' });
+    addText(formatCurrency(results.scenario1.nettoKosten), margin + boxWidth/2, yPos + 26, { size: 18, style: 'bold', color: [220, 38, 38], align: 'center' });
+    addText(`Afname: ${results.scenario1.totalAfnameKwh.toFixed(0)} kWh`, margin + 5, yPos + 36, { size: 8, color: [100, 100, 100] });
+    addText(`Injectie: ${results.scenario1.totalInjectieKwh.toFixed(0)} kWh`, margin + 5, yPos + 42, { size: 8, color: [100, 100, 100] });
+    addText(`Zelfconsumptie: ${results.scenario1.zelfconsumptiegraad.toFixed(1)}%`, margin + 5, yPos + 48, { size: 8, color: [100, 100, 100] });
+    
+    // Box 2: Domme batterij
+    const box2X = margin + boxWidth + 5;
+    drawBox(box2X, yPos, boxWidth, boxHeight, [239, 246, 255], [147, 197, 253]);
+    addText('Domme Batterij', box2X + boxWidth/2, yPos + 8, { size: 10, style: 'bold', align: 'center' });
+    addText('(Vaste tarieven)', box2X + boxWidth/2, yPos + 14, { size: 8, color: [100, 100, 100], align: 'center' });
+    addText(formatCurrency(results.scenario2.nettoKosten), box2X + boxWidth/2, yPos + 26, { size: 18, style: 'bold', color: [59, 130, 246], align: 'center' });
+    addText(`Besparing: ${formatCurrency(results.scenario2.savingsVsNoBattery)}/jaar`, box2X + 5, yPos + 36, { size: 8, color: [34, 197, 94] });
+    addText(`Terugverdientijd: ${results.scenario2.paybackYears === Infinity ? '∞' : results.scenario2.paybackYears.toFixed(1) + ' jaar'}`, box2X + 5, yPos + 42, { size: 8, color: [100, 100, 100] });
+    addText(`Zelfconsumptie: ${results.scenario2.zelfconsumptiegraad.toFixed(1)}%`, box2X + 5, yPos + 48, { size: 8, color: [100, 100, 100] });
+    
+    // Box 3: Slimme batterij (highlight)
+    const box3X = margin + (boxWidth + 5) * 2;
+    drawBox(box3X, yPos, boxWidth, boxHeight, [236, 253, 245], [16, 185, 129]);
+    doc.setFillColor(16, 185, 129);
+    doc.roundedRect(box3X + boxWidth - 35, yPos + 2, 33, 8, 2, 2, 'F');
+    addText('AANBEVOLEN', box3X + boxWidth - 18.5, yPos + 7.5, { size: 6, color: [255, 255, 255], style: 'bold', align: 'center' });
+    addText('Slimme Batterij', box3X + boxWidth/2, yPos + 14, { size: 10, style: 'bold', align: 'center' });
+    addText(formatCurrency(results.scenario3.nettoKosten), box3X + boxWidth/2, yPos + 26, { size: 18, style: 'bold', color: [16, 185, 129], align: 'center' });
+    addText(`Besparing: ${formatCurrency(results.scenario3.savingsVsNoBattery)}/jaar`, box3X + 5, yPos + 36, { size: 8, color: [34, 197, 94] });
+    addText(`Terugverdientijd: ${results.scenario3.paybackYears === Infinity ? '∞' : results.scenario3.paybackYears.toFixed(1) + ' jaar'}`, box3X + 5, yPos + 42, { size: 8, color: [100, 100, 100] });
+    addText(`Extra vs dom: +${formatCurrency(results.scenario3.savingsVsDumb)}/jr`, box3X + 5, yPos + 48, { size: 8, color: [245, 158, 11], style: 'bold' });
+    
+    yPos += boxHeight + 12;
+    
+    // === CONCLUSIE BOX ===
+    const savingsPerYear = results.scenario3.savingsVsNoBattery;
+    const paybackText = results.scenario3.paybackYears === Infinity ? 'niet terugverdiend' : `${results.scenario3.paybackYears.toFixed(1)} jaar`;
+    
+    drawBox(margin, yPos, contentWidth, 22, [254, 249, 195], [250, 204, 21]);
+    addText('💡 CONCLUSIE', margin + 5, yPos + 7, { size: 10, style: 'bold', color: [133, 77, 14] });
+    addText(`Met een slimme batterij bespaart u jaarlijks ${formatCurrency(savingsPerYear)} t.o.v. uw huidige situatie. De investering van ${formatCurrency(batteryPrice)} is terugverdiend in ${paybackText}.`, margin + 5, yPos + 15, { size: 9, color: [133, 77, 14] });
+    yPos += 30;
+    
+    // === MAANDELIJKS OVERZICHT ===
+    checkNewPage(80);
+    addText('MAANDELIJKS OVERZICHT', margin, yPos, { size: 12, style: 'bold', color: [30, 41, 59] });
+    yPos += 6;
+    
+    const monthNames = ['Januari','Februari','Maart','April','Mei','Juni','Juli','Augustus','September','Oktober','November','December'];
+    
+    // Tabel header
+    const colWidths = [28, 24, 24, 24, 24, 24, 32];
+    const rowHeight = 6;
+    
+    const drawTableRow = (data, isHeader = false, bgColor = null, textColors = null) => {
+      let xPos = margin;
+      
+      if (bgColor) {
+        doc.setFillColor(...bgColor);
+        doc.rect(margin, yPos - 4, contentWidth, rowHeight, 'F');
       }
       
-      pdf.save(`batterij-rapport-hivolta-${results.dataYear}.pdf`);
+      data.forEach((cell, i) => {
+        const color = textColors ? textColors[i] : (isHeader ? [71, 85, 105] : [50, 50, 50]);
+        const style = isHeader ? 'bold' : 'normal';
+        const align = i === 0 ? 'left' : 'right';
+        const xOffset = i === 0 ? 2 : colWidths[i] - 2;
+        addText(cell, xPos + xOffset, yPos, { size: 7, color, style, align: i === 0 ? 'left' : 'right' });
+        xPos += colWidths[i];
+      });
+      yPos += rowHeight;
+    };
+    
+    // Header rij
+    drawTableRow(['Maand', 'Scenario', 'Afname', 'Injectie', 'Gem.Afn', 'Gem.Inj', 'Maandkost'], true, [241, 245, 249]);
+    drawTableRow(['', '', '(kWh)', '(kWh)', '(c/kWh)', '(c/kWh)', ''], true, [241, 245, 249]);
+    
+    // Lijn onder header
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.3);
+    doc.line(margin, yPos - 3, margin + contentWidth, yPos - 3);
+    
+    // Data rijen
+    results.monthlyData.forEach((month, idx) => {
+      checkNewPage(20);
       
-    } catch (error) {
-      console.error('PDF generatie fout:', error);
-      alert('Er ging iets mis bij het genereren van de PDF. Probeer opnieuw.');
-    } finally {
-      // Herstel button
-      if (button) {
-        button.textContent = '📥 Download Rapport als PDF';
-        button.disabled = false;
-      }
-    }
+      const mIdx = parseInt(month.month.split('-')[1]) - 1;
+      const mName = monthNames[mIdx];
+      
+      // Huidige
+      drawTableRow([
+        mName, 'Huidige',
+        month.original.afnameKwh.toFixed(0),
+        month.original.injectieKwh.toFixed(0),
+        (month.original.avgAfnamePrice * 100).toFixed(1),
+        (month.original.avgInjectiePrice * 100).toFixed(1),
+        formatCurrency(month.original.nettoKost)
+      ], false, idx % 2 === 0 ? [255, 255, 255] : [248, 250, 252], [50,50,50,50,50,50,50,50,[220, 38, 38]]);
+      
+      // Dom
+      drawTableRow([
+        '', 'Dom',
+        month.dumb.afnameKwh.toFixed(0),
+        month.dumb.injectieKwh.toFixed(0),
+        (month.dumb.avgAfnamePrice * 100).toFixed(1),
+        (month.dumb.avgInjectiePrice * 100).toFixed(1),
+        formatCurrency(month.dumb.nettoKost)
+      ], false, idx % 2 === 0 ? [255, 255, 255] : [248, 250, 252], [50,50,50,50,50,50,50,50,[59, 130, 246]]);
+      
+      // Slim
+      drawTableRow([
+        '', 'Slim',
+        month.smart.afnameKwh.toFixed(0),
+        month.smart.injectieKwh.toFixed(0),
+        (month.smart.avgAfnamePrice * 100).toFixed(1),
+        (month.smart.avgInjectiePrice * 100).toFixed(1),
+        formatCurrency(month.smart.nettoKost)
+      ], false, idx % 2 === 0 ? [255, 255, 255] : [248, 250, 252], [50,50,50,50,50,50,50,50,[16, 185, 129]]);
+    });
+    
+    // Totalen
+    yPos += 2;
+    doc.setDrawColor(100, 100, 100);
+    doc.line(margin, yPos - 4, margin + contentWidth, yPos - 4);
+    
+    drawTableRow(['TOTAAL', 'Huidige', results.scenario1.totalAfnameKwh.toFixed(0), results.scenario1.totalInjectieKwh.toFixed(0), (afnameTarief*100).toFixed(1), (injectieTarief*100).toFixed(1), formatCurrency(results.scenario1.nettoKosten)], true, [241, 245, 249]);
+    drawTableRow(['', 'Dom', results.scenario2.totalAfnameKwh.toFixed(0), results.scenario2.totalInjectieKwh.toFixed(0), (afnameTarief*100).toFixed(1), (injectieTarief*100).toFixed(1), formatCurrency(results.scenario2.nettoKosten)], true, [239, 246, 255]);
+    drawTableRow(['', 'Slim', results.scenario3.totalAfnameKwh.toFixed(0), results.scenario3.totalInjectieKwh.toFixed(0), (results.scenario3.avgAfnamePrice*100).toFixed(1), (results.scenario3.avgInjectiePrice*100).toFixed(1), formatCurrency(results.scenario3.nettoKosten)], true, [236, 253, 245]);
+    
+    // === DISCLAIMER ===
+    yPos += 8;
+    checkNewPage(30);
+    
+    drawBox(margin, yPos, contentWidth, 20, [254, 243, 199], [250, 204, 21]);
+    addText('⚠️ Disclaimer', margin + 5, yPos + 6, { size: 8, style: 'bold', color: [146, 64, 14] });
+    addText('Deze calculator geeft een schatting op basis van historische verbruiksdata en marktprijzen. De werkelijke besparingen kunnen afwijken', margin + 5, yPos + 12, { size: 7, color: [146, 64, 14] });
+    addText('door veranderingen in energieprijzen, verbruikspatronen, weersomstandigheden en andere factoren. Dit is geen garantie of belofte.', margin + 5, yPos + 17, { size: 7, color: [146, 64, 14] });
+    
+    // === FOOTER ===
+    doc.setFontSize(8);
+    doc.setTextColor(150, 150, 150);
+    doc.text(`© ${new Date().getFullYear()} Hivolta - www.hivolta.be`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+    
+    // Download
+    doc.save(`batterij-rapport-hivolta-${results.dataYear}.pdf`);
   };
 
   return (
@@ -1153,7 +1287,7 @@ export default function BatterijCalculator() {
         
         {/* Results Tab */}
         {activeTab === 'results' && results && (
-          <div ref={resultsRef}>
+          <div>
             {/* Summary Cards */}
             <div style={styles.scenarioGrid}>
               {/* Current */}
@@ -1300,7 +1434,7 @@ export default function BatterijCalculator() {
             
             {/* PDF Download */}
             <div style={{textAlign:'center',marginTop:'24px'}}>
-              <button data-pdf-button onClick={generatePDF} style={styles.downloadBtn}>
+              <button onClick={generatePDF} style={styles.downloadBtn}>
                 📥 Download Rapport als PDF
               </button>
             </div>
