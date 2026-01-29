@@ -1011,7 +1011,6 @@ export default function BatterijCalculator() {
     await processFiles(files);
     event.target.value = '';
   }, [processFiles]);
-  }, [uploadedFiles]);
 
   const removeFile = (index) => {
     const newFiles = uploadedFiles.filter((_, i) => i !== index);
