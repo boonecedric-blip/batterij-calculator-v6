@@ -555,9 +555,56 @@ const extrapolateToFullYear = (data, targetYear) => {
 // BATTERY SIMULATION
 // =============================================
 
+// Bereken PV productie per kwartier, gecalibreerd op werkelijke injectie
+const calculateCalibratedPV = (data, annualPVProduction) => {
+  // Stap 1: Bereken ruwe PV profiel gebaseerd op seizoen en uur
+  const rawPV = data.map(row => {
+    const dt = row.datetime;
+    const hour = dt.getHours() + dt.getMinutes() / 60;
+    const month = dt.getMonth();
+    
+    // Geen productie 's nachts
+    const sunTimes = {
+      0: [8.5, 16.5], 1: [7.8, 17.5], 2: [7.0, 18.5], 3: [6.5, 20.0],
+      4: [5.8, 21.0], 5: [5.3, 21.5], 6: [5.5, 21.3], 7: [6.2, 20.5],
+      8: [7.0, 19.5], 9: [7.8, 18.0], 10: [8.0, 17.0], 11: [8.5, 16.5]
+    };
+    const [sunrise, sunset] = sunTimes[month];
+    
+    if (hour < sunrise || hour > sunset) return 0;
+    
+    // Bell curve voor dagproductie
+    const dayLength = sunset - sunrise;
+    const dayPosition = (hour - sunrise) / dayLength;
+    const dailyFactor = Math.sin(Math.PI * dayPosition);
+    
+    // Maandelijkse factor (België)
+    const monthlyFactors = [0.03, 0.05, 0.08, 0.11, 0.13, 0.14, 0.13, 0.12, 0.09, 0.06, 0.04, 0.02];
+    const monthlyFactor = monthlyFactors[month];
+    
+    return dailyFactor * monthlyFactor;
+  });
+  
+  // Stap 2: Normaliseer zodat totaal = annualPVProduction
+  const rawTotal = rawPV.reduce((sum, v) => sum + v, 0);
+  const scaleFactor = rawTotal > 0 ? annualPVProduction / rawTotal : 0;
+  
+  const pvProduction = rawPV.map(v => v * scaleFactor);
+  
+  // Stap 3: Valideer tegen werkelijke injectie
+  // PV moet altijd >= injectie zijn (je kunt niet meer injecteren dan je produceert)
+  return data.map((row, i) => {
+    const injectie = row.injectieOriginal || 0;
+    return Math.max(pvProduction[i], injectie);
+  });
+};
+
 const simulateDumbBattery = (data, config) => {
-  const { capacityKwh, maxPowerKw, afnameTarief, injectieTarief } = config;
+  const { capacityKwh, maxPowerKw, afnameTarief, injectieTarief, annualPVProduction } = config;
   const maxChargePerQuarter = maxPowerKw / 4;
+  
+  // Bereken PV productie per kwartier
+  const pvProduction = calculateCalibratedPV(data, annualPVProduction || 10000);
   
   let soc = capacityKwh * 0.5;
   let totalAfnameNet = 0;
@@ -567,23 +614,35 @@ const simulateDumbBattery = (data, config) => {
   
   const results = [];
   
-  for (const row of data) {
-    const { pv, verbruik } = row;
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const afnameOriginal = row.afnameOriginal || 0;
+    const injectieOriginal = row.injectieOriginal || 0;
     
-    const pvForHouse = Math.min(pv, verbruik);
+    // Bereken werkelijk verbruik en PV voor dit kwartier
+    const pv = pvProduction[i];
+    const eigenverbruikZonderBatterij = pv - injectieOriginal;
+    const totaalVerbruik = afnameOriginal + eigenverbruikZonderBatterij;
+    
+    // Nu simuleren we MET batterij
+    // Stap 1: PV dekt eerst verbruik
+    const pvForHouse = Math.min(pv, totaalVerbruik);
     let pvRemaining = pv - pvForHouse;
-    let houseRemaining = verbruik - pvForHouse;
+    let houseRemaining = totaalVerbruik - pvForHouse;
     
+    // Stap 2: PV overschot naar batterij
     const maxCharge = Math.min(maxChargePerQuarter, capacityKwh - soc);
     const chargeFromPV = Math.min(pvRemaining, maxCharge);
-    pvRemaining -= chargeFromPV;
     soc += chargeFromPV;
+    pvRemaining -= chargeFromPV;
     
+    // Stap 3: Tekort uit batterij
     const maxDischarge = Math.min(maxChargePerQuarter, soc);
     const dischargeForHouse = Math.min(houseRemaining, maxDischarge);
     soc -= dischargeForHouse;
     houseRemaining -= dischargeForHouse;
     
+    // Resultaat: wat gaat naar/van net
     const gridAfname = houseRemaining;
     const gridInjectie = pvRemaining;
     
@@ -592,7 +651,14 @@ const simulateDumbBattery = (data, config) => {
     totalCostAfname += gridAfname * afnameTarief;
     totalRevenueInjectie += gridInjectie * injectieTarief;
     
-    results.push({ ...row, soc, gridAfname, gridInjectie });
+    results.push({ 
+      ...row, 
+      soc, 
+      gridAfname, 
+      gridInjectie,
+      pv,
+      totaalVerbruik
+    });
   }
   
   return {
@@ -606,17 +672,31 @@ const simulateDumbBattery = (data, config) => {
 };
 
 const simulateSmartBattery = (data, config) => {
-  const { capacityKwh, maxPowerKw } = config;
+  const { capacityKwh, maxPowerKw, annualPVProduction } = config;
   const afnameToeslag = 0.14;
   const injectieKost = 0.0115;
   const arbitrageDrempel = 0.05;
   const maxChargePerQuarter = maxPowerKw / 4;
   const safetyMargin = 0.5;
   
-  const totalPV = data.reduce((sum, r) => sum + r.pv, 0);
-  const totalVerbruik = data.reduce((sum, r) => sum + r.verbruik, 0);
+  // Bereken PV productie per kwartier
+  const pvProduction = calculateCalibratedPV(data, annualPVProduction || 10000);
+  
+  // Bereken verbruik per kwartier
+  const consumption = data.map((row, i) => {
+    const pv = pvProduction[i];
+    const injectie = row.injectieOriginal || 0;
+    const afname = row.afnameOriginal || 0;
+    const eigenverbruik = pv - injectie;
+    return afname + eigenverbruik;
+  });
+  
+  // Check of PV overvloedig is
+  const totalPV = pvProduction.reduce((sum, v) => sum + v, 0);
+  const totalVerbruik = consumption.reduce((sum, v) => sum + v, 0);
   const pvOvervloedig = totalPV > totalVerbruik * 1.1;
   
+  // Prijsdrempels
   const positivePrices = data.filter(r => (r.marketPrice - injectieKost) > 0).map(r => r.marketPrice - injectieKost);
   const highPriceThreshold = positivePrices.length > 0 
     ? positivePrices.sort((a, b) => a - b)[Math.floor(positivePrices.length * 0.75)] 
@@ -628,86 +708,115 @@ const simulateSmartBattery = (data, config) => {
   let totalCostAfname = 0;
   let totalRevenueInjectie = 0;
   let totalArbitrageKwh = 0;
+  let totalCurtailedKwh = 0;
   
+  // Future deficits berekenen (voor arbitrage beslissingen)
   const futureDeficits = [];
-  let runningConsumption = 0;
+  let runningVerbruik = 0;
   let runningPV = 0;
   for (let i = data.length - 1; i >= 0; i--) {
-    runningConsumption += data[i].verbruik;
-    runningPV += data[i].pv;
-    futureDeficits[i] = Math.max(0, runningConsumption - runningPV);
+    runningVerbruik += consumption[i];
+    runningPV += pvProduction[i];
+    futureDeficits[i] = Math.max(0, runningVerbruik - runningPV);
   }
   
   const results = [];
   
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
-    const { pv, verbruik, marketPrice } = row;
+    const pv = pvProduction[i];
+    const verbruik = consumption[i];
+    const marketPrice = row.marketPrice || 0.08;
     
     const prijsAfname = marketPrice + afnameToeslag;
     const prijsInjectie = marketPrice - injectieKost;
     const futureDeficit = futureDeficits[i];
     
-    const maxCharge = Math.min(maxChargePerQuarter, capacityKwh - soc);
-    const maxDischarge = Math.min(maxChargePerQuarter, soc);
+    let currentSoc = soc;
+    const maxCharge = Math.min(maxChargePerQuarter, capacityKwh - currentSoc);
+    const maxDischarge = Math.min(maxChargePerQuarter, currentSoc);
     
     let charge = 0;
     let discharge = 0;
-    let injectPV = 0;
-    let injectArb = 0;
-    let netAfname = 0;
+    let gridInjectie = 0;
+    let gridAfname = 0;
+    let curtailed = 0;
     
+    // Stap 1: PV dekt eerst verbruik
     const pvForHouse = Math.min(pv, verbruik);
     let pvRemaining = pv - pvForHouse;
     let houseRemaining = verbruik - pvForHouse;
     
+    // Stap 2: PV overschot naar batterij
     charge = Math.min(pvRemaining, maxCharge);
-    const pvAfterBattery = pvRemaining - charge;
+    pvRemaining -= charge;
     
-    if (prijsInjectie >= 0) {
-      injectPV = pvAfterBattery;
+    // Stap 3: Rest PV - injecteren of curtailen
+    if (pvRemaining > 0) {
+      if (prijsInjectie >= 0) {
+        gridInjectie = pvRemaining;
+      } else {
+        // Negatieve prijs: curtail
+        curtailed = pvRemaining;
+        totalCurtailedKwh += curtailed;
+      }
     }
     
+    // Stap 4: Tekort uit batterij
     if (houseRemaining > 0) {
-      const dischargeForHouse = Math.min(houseRemaining, maxDischarge);
+      const dischargeForHouse = Math.min(houseRemaining, maxDischarge - discharge);
       discharge += dischargeForHouse;
-      netAfname = houseRemaining - dischargeForHouse;
+      houseRemaining -= dischargeForHouse;
+      gridAfname = houseRemaining;
     }
     
-    if (prijsInjectie > arbitrageDrempel) {
-      const neededReserve = futureDeficit + safetyMargin;
+    // Stap 5: Arbitrage - verkoop uit batterij bij hoge prijs
+    if (prijsInjectie > highPriceThreshold) {
+      const neededReserve = Math.min(futureDeficit / 96, capacityKwh * 0.3) + safetyMargin;
+      const availableSoc = currentSoc + charge - discharge;
       const remainingDischargeCapacity = maxDischarge - discharge;
-      const availableSoc = soc + charge - discharge;
       let sellable = Math.max(0, availableSoc - neededReserve);
       sellable = Math.min(sellable, remainingDischargeCapacity);
       
-      if (sellable > 0 && prijsInjectie > highPriceThreshold) {
-        const priceFactor = Math.min(1.0, (prijsInjectie - arbitrageDrempel) / arbitrageDrempel);
-        injectArb = sellable * priceFactor;
-        discharge += injectArb;
+      if (sellable > 0.1) {
+        const priceFactor = Math.min(1.0, (prijsInjectie - arbitrageDrempel) / 0.10);
+        const arbitrageSell = sellable * priceFactor;
+        discharge += arbitrageSell;
+        gridInjectie += arbitrageSell;
+        totalArbitrageKwh += arbitrageSell;
       }
     }
     
-    if (!pvOvervloedig && futureDeficit > 0 && (marketPrice + afnameToeslag) < 0) {
+    // Stap 6: Slim laden van net bij zeer lage/negatieve prijs
+    if (!pvOvervloedig && futureDeficit > capacityKwh && prijsAfname < 0.10) {
       const remainingCharge = maxCharge - charge;
-      if (remainingCharge > 0 && soc < capacityKwh * 0.9) {
-        const gridCharge = Math.min(remainingCharge, futureDeficit);
+      if (remainingCharge > 0 && currentSoc + charge - discharge < capacityKwh * 0.8) {
+        const gridCharge = Math.min(remainingCharge, capacityKwh * 0.3);
         charge += gridCharge;
-        netAfname += gridCharge;
+        gridAfname += gridCharge;
       }
     }
     
-    soc = Math.max(0, Math.min(capacityKwh, soc + charge - discharge));
+    // Update SoC
+    soc = Math.max(0, Math.min(capacityKwh, currentSoc + charge - discharge));
     
-    const totalInjectie = injectPV + injectArb;
+    // Totalen
+    totalAfnameNet += gridAfname;
+    totalInjectieNet += gridInjectie;
+    totalCostAfname += gridAfname * prijsAfname;
+    totalRevenueInjectie += gridInjectie * prijsInjectie;
     
-    totalAfnameNet += netAfname;
-    totalInjectieNet += totalInjectie;
-    totalCostAfname += netAfname * prijsAfname;
-    totalRevenueInjectie += totalInjectie * prijsInjectie;
-    totalArbitrageKwh += injectArb;
-    
-    results.push({ ...row, soc, gridAfname: netAfname, gridInjectie: totalInjectie, prijsAfname, prijsInjectie });
+    results.push({ 
+      ...row, 
+      soc, 
+      gridAfname, 
+      gridInjectie, 
+      prijsAfname, 
+      prijsInjectie,
+      pv,
+      verbruik,
+      curtailed
+    });
   }
   
   return {
@@ -717,6 +826,7 @@ const simulateSmartBattery = (data, config) => {
     totalCostAfname,
     totalRevenueInjectie,
     totalArbitrageKwh,
+    totalCurtailedKwh,
     nettoKosten: totalCostAfname - totalRevenueInjectie,
     avgAfnamePrice: totalAfnameNet > 0 ? totalCostAfname / totalAfnameNet : 0,
     avgInjectiePrice: totalInjectieNet > 0 ? totalRevenueInjectie / totalInjectieNet : 0
@@ -1092,7 +1202,8 @@ export default function BatterijCalculator() {
         capacityKwh: batteryCapacity,
         maxPowerKw: batteryPower,
         afnameTarief,
-        injectieTarief
+        injectieTarief,
+        annualPVProduction
       });
       
       const scenario2PVUsed = scenario1.totalPVKwh - scenario2.totalInjectieKwh;
@@ -1101,7 +1212,8 @@ export default function BatterijCalculator() {
       // Scenario 3
       const scenario3 = simulateSmartBattery(energyProfile, {
         capacityKwh: batteryCapacity,
-        maxPowerKw: batteryPower
+        maxPowerKw: batteryPower,
+        annualPVProduction
       });
       
       const scenario3PVUsed = scenario1.totalPVKwh - scenario3.totalInjectieKwh;
