@@ -420,8 +420,14 @@ const processFluviusData = (data) => {
     
     volume = parseFloat(String(volume).replace(',', '.')) || 0;
     
-    const isAfname = register.toLowerCase().includes('afname');
-    const isInjectie = register.toLowerCase().includes('injectie');
+    // BELANGRIJK: Alleen "Actief" registers tellen (kWh), niet Reactief/Capacitief/Inductief (kVArh)
+    const registerLower = register.toLowerCase();
+    const isActief = registerLower.includes('actief') && !registerLower.includes('reactief');
+    const isAfname = registerLower.includes('afname') && isActief;
+    const isInjectie = registerLower.includes('injectie') && isActief;
+    
+    // Skip niet-actieve registers
+    if (!isAfname && !isInjectie) continue;
     
     let entry = processed.find(p => p.datetime.getTime() === datetime.getTime());
     if (!entry) {
@@ -725,6 +731,9 @@ export default function BatterijCalculator() {
   const [uploadedFiles, setUploadedFiles] = useState([]);
   const [csvData, setCsvData] = useState(null);
   const [processedData, setProcessedData] = useState(null);
+  const [allProcessedData, setAllProcessedData] = useState(null); // Alle data voor jaar selectie
+  const [availableYears, setAvailableYears] = useState([]); // Jaren met >90% data
+  const [selectedYear, setSelectedYear] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStatus, setProcessingStatus] = useState('');
   const [progress, setProgress] = useState(0);
@@ -732,6 +741,7 @@ export default function BatterijCalculator() {
   const [activeTab, setActiveTab] = useState('input');
   const [results, setResults] = useState(null);
   const [pdfGenerating, setPdfGenerating] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   
   const [batteryCapacity, setBatteryCapacity] = useState(9);
   const [batteryPrice, setBatteryPrice] = useState(4500);
@@ -742,22 +752,95 @@ export default function BatterijCalculator() {
   const formatCurrency = (value) => `€${value.toFixed(2)}`;
   const formatNumber = (value, decimals = 0) => value.toFixed(decimals);
 
-  const handleFileUpload = useCallback(async (event) => {
-    const files = Array.from(event.target.files || []);
+  // Verwerk data voor geselecteerd jaar
+  const processYearData = useCallback((processed, targetYear) => {
+    const yearData = processed.filter(row => row.datetime.getFullYear() === targetYear);
+    const expectedQuarters = (targetYear % 4 === 0) ? 35136 : 35040;
+    const coverage = (yearData.length / expectedQuarters) * 100;
+    
+    let finalData;
+    let extrapolationInfo = null;
+    
+    if (coverage < 95) {
+      finalData = extrapolateToFullYear(yearData, targetYear);
+      extrapolationInfo = finalData.extrapolationInfo;
+    } else {
+      finalData = yearData;
+    }
+    
+    const hasAfname = processed.some(r => r.afname > 0);
+    const hasInjectie = processed.some(r => r.injectie > 0);
+    
+    setCsvData({ 
+      year: targetYear, 
+      recordCount: yearData.length,
+      extrapolationInfo: extrapolationInfo,
+      coverage: coverage.toFixed(1),
+      hasAfname,
+      hasInjectie
+    });
+    setProcessedData(finalData);
+    setSelectedYear(targetYear);
+  }, []);
+
+  // Handler voor jaar wijziging
+  const handleYearChange = useCallback((newYear) => {
+    if (!allProcessedData || !newYear) return;
+    setProcessingStatus('Jaar wijzigen...');
+    setIsProcessing(true);
+    
+    setTimeout(() => {
+      processYearData(allProcessedData, parseInt(newYear));
+      setProcessingStatus('');
+      setIsProcessing(false);
+    }, 100);
+  }, [allProcessedData, processYearData]);
+
+  // Drag & drop handlers
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
+    if (files.length > 0) {
+      // Trigger file processing
+      processFiles(files);
+    }
+  }, []);
+
+  const processFiles = useCallback(async (files) => {
     if (files.length === 0) return;
     
     setIsProcessing(true);
     setError(null);
     setProgress(0);
+    setResults(null);
     
     try {
       let allParsedData = [];
       const newUploadedFiles = [...uploadedFiles];
+      const totalFiles = files.length;
       
       for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
         const file = files[fileIdx];
-        setProcessingStatus(`Bestand ${fileIdx + 1}/${files.length} lezen: ${file.name}...`);
-        setProgress(Math.floor((fileIdx / files.length) * 30));
+        const progressBase = (fileIdx / totalFiles) * 40;
+        
+        setProcessingStatus(`📂 Bestand ${fileIdx + 1}/${totalFiles} lezen...`);
+        setProgress(Math.floor(progressBase));
+        await new Promise(r => setTimeout(r, 30));
         
         // Read file
         const text = await new Promise((resolve, reject) => {
@@ -767,8 +850,9 @@ export default function BatterijCalculator() {
           reader.readAsText(file, 'utf-8');
         });
         
-        setProcessingStatus(`Bestand ${fileIdx + 1}/${files.length} parsen...`);
-        await new Promise(r => setTimeout(r, 50)); // UI update
+        setProcessingStatus(`📋 Bestand ${fileIdx + 1}/${totalFiles} parsen...`);
+        setProgress(Math.floor(progressBase + 10));
+        await new Promise(r => setTimeout(r, 30));
         
         const parsed = parseCSV(text);
         
@@ -790,84 +874,143 @@ export default function BatterijCalculator() {
           rows: parsed.length
         });
         
+        setProcessingStatus(`✅ ${file.name} geladen (${parsed.length.toLocaleString()} rijen)`);
+        setProgress(Math.floor(progressBase + 20));
+        await new Promise(r => setTimeout(r, 30));
+        
         allParsedData = allParsedData.concat(parsed);
       }
       
       setUploadedFiles(newUploadedFiles);
-      setProcessingStatus('Data verwerken...');
-      setProgress(40);
-      await new Promise(r => setTimeout(r, 50));
       
       // Process all data together
-      const processed = processFluviusData(allParsedData);
-      setProgress(60);
+      setProcessingStatus('🔄 Data samenvoegen en verwerken...');
+      setProgress(45);
+      await new Promise(r => setTimeout(r, 50));
       
-      if (processed.length === 0) {
+      const totalRows = allParsedData.length;
+      let processedCount = 0;
+      
+      const processed = [];
+      const batchSize = 5000;
+      
+      for (let i = 0; i < allParsedData.length; i += batchSize) {
+        const batch = allParsedData.slice(i, i + batchSize);
+        const batchProcessed = processFluviusData(batch);
+        processed.push(...batchProcessed);
+        
+        processedCount += batch.length;
+        const pct = 45 + Math.floor((processedCount / totalRows) * 30);
+        setProgress(pct);
+        setProcessingStatus(`🔄 Verwerken: ${processedCount.toLocaleString()} / ${totalRows.toLocaleString()} rijen`);
+        await new Promise(r => setTimeout(r, 10));
+      }
+      
+      // Merge duplicates
+      setProcessingStatus('🔗 Data combineren...');
+      setProgress(78);
+      await new Promise(r => setTimeout(r, 30));
+      
+      const mergedData = [];
+      const seen = new Map();
+      for (const row of processed) {
+        const key = row.datetime.getTime();
+        if (seen.has(key)) {
+          const existing = seen.get(key);
+          existing.afname += row.afname;
+          existing.injectie += row.injectie;
+        } else {
+          const newRow = { ...row };
+          seen.set(key, newRow);
+          mergedData.push(newRow);
+        }
+      }
+      mergedData.sort((a, b) => a.datetime - b.datetime);
+      
+      if (mergedData.length === 0) {
         throw new Error('Geen geldige meetdata gevonden');
       }
       
-      // Check for missing data types
-      const hasAfname = processed.some(r => r.afname > 0);
-      const hasInjectie = processed.some(r => r.injectie > 0);
+      // Sla alle data op voor jaar selectie
+      setAllProcessedData(mergedData);
       
-      setProcessingStatus('Beste jaar selecteren...');
-      setProgress(70);
+      // Analyseer beschikbare jaren
+      setProcessingStatus('📊 Jaren analyseren...');
+      setProgress(85);
+      await new Promise(r => setTimeout(r, 30));
       
-      const yearCounts = {};
-      processed.forEach(row => {
+      const yearStats = {};
+      mergedData.forEach(row => {
         const year = row.datetime.getFullYear();
-        if (year >= 2024) {
-          yearCounts[year] = (yearCounts[year] || 0) + 1;
+        if (year >= 2020) {
+          yearStats[year] = (yearStats[year] || 0) + 1;
         }
       });
       
-      const bestYear = Object.entries(yearCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+      // Vind jaren met >90% dekking
+      const yearsWithGoodCoverage = [];
+      Object.entries(yearStats).forEach(([year, count]) => {
+        const y = parseInt(year);
+        const expected = (y % 4 === 0) ? 35136 : 35040;
+        const coverage = (count / expected) * 100;
+        if (coverage >= 50) { // Toon jaren met minstens 50% data
+          yearsWithGoodCoverage.push({
+            year: y,
+            count,
+            coverage: coverage.toFixed(1)
+          });
+        }
+      });
       
-      if (!bestYear) {
-        throw new Error('Geen data van 2024 of 2025 gevonden');
+      yearsWithGoodCoverage.sort((a, b) => b.year - a.year);
+      setAvailableYears(yearsWithGoodCoverage);
+      
+      if (yearsWithGoodCoverage.length === 0) {
+        throw new Error('Geen jaar gevonden met voldoende data (min. 50%)');
       }
       
-      const targetYear = parseInt(bestYear);
-      const yearData = processed.filter(row => row.datetime.getFullYear() === targetYear);
+      // Selecteer beste jaar (hoogste dekking, dan nieuwste)
+      setProcessingStatus('📅 Beste jaar selecteren...');
+      setProgress(90);
+      await new Promise(r => setTimeout(r, 30));
       
-      const expectedQuarters = (targetYear % 4 === 0) ? 35136 : 35040;
-      const coverage = (yearData.length / expectedQuarters) * 100;
+      const bestYear = yearsWithGoodCoverage.sort((a, b) => {
+        // Prioriteit: eerst >90% dekking, dan nieuwste jaar
+        const aGood = parseFloat(a.coverage) >= 90;
+        const bGood = parseFloat(b.coverage) >= 90;
+        if (aGood && !bGood) return -1;
+        if (!aGood && bGood) return 1;
+        return b.year - a.year;
+      })[0];
       
-      setProcessingStatus('Data finaliseren...');
-      setProgress(80);
+      setProcessingStatus('✨ Data finaliseren...');
+      setProgress(95);
+      await new Promise(r => setTimeout(r, 30));
       
-      let finalData;
-      let extrapolationInfo = null;
-      
-      if (coverage < 95) {
-        setProcessingStatus('Data extrapoleren naar volledig jaar...');
-        finalData = extrapolateToFullYear(yearData, targetYear);
-        extrapolationInfo = finalData.extrapolationInfo;
-      } else {
-        finalData = yearData;
-      }
+      processYearData(mergedData, bestYear.year);
       
       setProgress(100);
-      setCsvData({ 
-        year: targetYear, 
-        recordCount: yearData.length,
-        extrapolationInfo: extrapolationInfo,
-        coverage: coverage.toFixed(1),
-        hasAfname,
-        hasInjectie
-      });
-      setProcessedData(finalData);
+      setProcessingStatus('✅ Klaar!');
+      await new Promise(r => setTimeout(r, 500));
       setProcessingStatus('');
       
     } catch (err) {
       setError(err.message);
       setCsvData(null);
       setProcessedData(null);
+      setAllProcessedData(null);
+      setAvailableYears([]);
     } finally {
       setIsProcessing(false);
-      // Reset file input
-      event.target.value = '';
     }
+  }, [uploadedFiles, processYearData]);
+
+  const handleFileUpload = useCallback(async (event) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+    await processFiles(files);
+    event.target.value = '';
+  }, [processFiles]);
   }, [uploadedFiles]);
 
   const removeFile = (index) => {
@@ -876,6 +1019,10 @@ export default function BatterijCalculator() {
     if (newFiles.length === 0) {
       setCsvData(null);
       setProcessedData(null);
+      setAllProcessedData(null);
+      setAvailableYears([]);
+      setSelectedYear(null);
+      setResults(null);
     }
   };
 
@@ -883,6 +1030,10 @@ export default function BatterijCalculator() {
     setUploadedFiles([]);
     setCsvData(null);
     setProcessedData(null);
+    setAllProcessedData(null);
+    setAvailableYears([]);
+    setSelectedYear(null);
+    setResults(null);
     setError(null);
   };
 
@@ -1377,10 +1528,21 @@ export default function BatterijCalculator() {
             <div style={styles.card}>
               <h2 style={styles.cardTitle}>📁 1. Upload Fluvius CSV</h2>
               <p style={{color:'#94a3b8', fontSize:'0.9rem', marginBottom:'16px'}}>
-                Je kunt één gecombineerd bestand uploaden, of aparte bestanden voor afname en injectie.
+                Sleep bestanden hierheen of klik om te selecteren. Je kunt één gecombineerd bestand uploaden, of aparte bestanden voor afname en injectie.
               </p>
               
-              <div style={styles.uploadArea}>
+              <div 
+                style={{
+                  ...styles.uploadArea,
+                  borderColor: isDragging ? '#10b981' : 'rgba(255,255,255,0.2)',
+                  background: isDragging ? 'rgba(16,185,129,0.1)' : 'transparent',
+                  transform: isDragging ? 'scale(1.02)' : 'scale(1)',
+                  transition: 'all 0.2s ease'
+                }}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+              >
                 <input 
                   type="file" 
                   accept=".csv" 
@@ -1390,10 +1552,10 @@ export default function BatterijCalculator() {
                   style={{display:'none'}} 
                   id="csv-upload" 
                 />
-                <label htmlFor="csv-upload" style={{cursor: isProcessing ? 'wait' : 'pointer'}}>
-                  <div style={{fontSize:'3rem',marginBottom:'8px'}}>📄</div>
+                <label htmlFor="csv-upload" style={{cursor: isProcessing ? 'wait' : 'pointer', display:'block'}}>
+                  <div style={{fontSize:'3rem',marginBottom:'8px'}}>{isDragging ? '📥' : '📄'}</div>
                   <p style={{fontSize:'1.1rem',margin:'8px 0'}}>
-                    {isProcessing ? processingStatus || 'Verwerken...' : 'Klik om CSV bestanden te selecteren'}
+                    {isDragging ? 'Laat los om te uploaden!' : (isProcessing ? '' : 'Sleep CSV bestanden hierheen of klik om te selecteren')}
                   </p>
                   <p style={{fontSize:'0.875rem',color:'#94a3b8'}}>
                     Exporteer kwartierdata van mijn.fluvius.be
@@ -1401,15 +1563,24 @@ export default function BatterijCalculator() {
                 </label>
               </div>
               
-              {/* Progress bar */}
+              {/* Progress bar met status */}
               {isProcessing && (
-                <div style={styles.progressBar}>
-                  <div style={{...styles.progressFill, width: `${progress}%`}} />
+                <div style={{marginTop:'16px'}}>
+                  <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'}}>
+                    <span style={{color:'#10b981', fontSize:'0.9rem', fontWeight:'500'}}>{processingStatus}</span>
+                    <span style={{color:'#94a3b8', fontSize:'0.9rem'}}>{progress}%</span>
+                  </div>
+                  <div style={styles.progressBar}>
+                    <div style={{...styles.progressFill, width: `${progress}%`}} />
+                  </div>
+                  <p style={{color:'#64748b', fontSize:'0.8rem', marginTop:'8px', textAlign:'center'}}>
+                    Even geduld, grote bestanden kunnen enkele seconden duren...
+                  </p>
                 </div>
               )}
               
               {/* Uploaded files */}
-              {uploadedFiles.length > 0 && (
+              {uploadedFiles.length > 0 && !isProcessing && (
                 <div style={{marginTop:'16px'}}>
                   <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'}}>
                     <span style={{color:'#94a3b8', fontSize:'0.9rem'}}>Geüploade bestanden:</span>
@@ -1431,7 +1602,37 @@ export default function BatterijCalculator() {
                 </div>
               )}
               
-              {csvData && (
+              {/* Jaar selectie dropdown */}
+              {availableYears.length > 1 && !isProcessing && (
+                <div style={{marginTop:'16px', padding:'12px', background:'rgba(59,130,246,0.1)', borderRadius:'12px', border:'1px solid rgba(59,130,246,0.3)'}}>
+                  <label style={{display:'block', color:'#93c5fd', fontSize:'0.9rem', marginBottom:'8px', fontWeight:'500'}}>
+                    📅 Meerdere jaren beschikbaar - Selecteer jaar:
+                  </label>
+                  <select 
+                    value={selectedYear || ''} 
+                    onChange={(e) => handleYearChange(e.target.value)}
+                    style={{
+                      width:'100%',
+                      padding:'10px 12px',
+                      background:'rgba(30,41,59,0.8)',
+                      border:'1px solid rgba(59,130,246,0.5)',
+                      borderRadius:'8px',
+                      color:'white',
+                      fontSize:'1rem',
+                      cursor:'pointer'
+                    }}
+                  >
+                    {availableYears.map(y => (
+                      <option key={y.year} value={y.year} style={{background:'#1e293b'}}>
+                        {y.year} - {y.coverage}% dekking ({y.count.toLocaleString()} meetpunten)
+                        {parseFloat(y.coverage) >= 90 ? ' ✓' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              
+              {csvData && !isProcessing && (
                 <div style={styles.success}>
                   <div>✅ Data geladen: {csvData.recordCount.toLocaleString()} meetpunten van {csvData.year}</div>
                   <div style={{fontSize:'0.875rem',color:'#94a3b8',marginTop:'4px'}}>
@@ -1442,7 +1643,7 @@ export default function BatterijCalculator() {
                   </div>
                   {csvData.extrapolationInfo && (
                     <div style={styles.warning}>
-                      ⚠️ Data onvolledig - {csvData.extrapolationInfo.extrapolatedCount.toLocaleString()} meetpunten geëxtrapoleerd
+                      ⚠️ Data onvolledig - {csvData.extrapolationInfo.extrapolatedCount.toLocaleString()} meetpunten geëxtrapoleerd naar volledig jaar
                     </div>
                   )}
                 </div>
